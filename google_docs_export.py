@@ -1,7 +1,9 @@
 """
 Optional Google Docs export for SEO reports.
 Requires credentials.json (OAuth) in project root or path in GOOGLE_CREDENTIALS_FILE.
+Also supports Google Drive so docs can be stored in a specific folder.
 """
+import os
 import re
 from pathlib import Path
 
@@ -15,7 +17,11 @@ try:
 except ImportError:
     HAS_GOOGLE = False
 
-SCOPES = ["https://www.googleapis.com/auth/documents"]
+# Docs + Drive so we can create a folder and move docs into it
+SCOPES = [
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive.file",
+]
 
 
 def _get_creds(credentials_path: str | None) -> "Credentials | None":
@@ -41,6 +47,49 @@ def _get_creds(credentials_path: str | None) -> "Credentials | None":
             with open(token_path, "w") as f:
                 f.write(creds.to_json())
     return creds
+
+
+def _ensure_doc_in_folder(creds: "Credentials", document_id: str) -> None:
+    """
+    Ensure the given Doc is inside the Drive folder defined by GOOGLE_DRIVE_FOLDER_NAME
+    (default: SEO-Health-Tekspot). Creates the folder on first run.
+    """
+    folder_name = os.environ.get("GOOGLE_DRIVE_FOLDER_NAME") or "SEO-Health-Tekspot"
+    if not folder_name:
+        return
+    try:
+        drive_service = build("drive", "v3", credentials=creds)
+        # Find or create folder
+        query = (
+            "mimeType = 'application/vnd.google-apps.folder' "
+            f"and name = '{folder_name}' and trashed = false"
+        )
+        res = drive_service.files().list(
+            q=query, pageSize=1, fields="files(id)"
+        ).execute()
+        files = res.get("files") or []
+        if files:
+            folder_id = files[0]["id"]
+        else:
+            meta = {
+                "name": folder_name,
+                "mimeType": "application/vnd.google-apps.folder",
+            }
+            folder = drive_service.files().create(
+                body=meta, fields="id"
+            ).execute()
+            folder_id = folder.get("id")
+        if not folder_id:
+            return
+        # Add the doc to this folder (keeps existing parents)
+        drive_service.files().update(
+            fileId=document_id,
+            addParents=folder_id,
+            fields="id, parents",
+        ).execute()
+    except Exception:
+        # Folder placement is best-effort; ignore failures so report creation still works.
+        return
 
 
 def _markdown_to_plain(text: str) -> str:
@@ -202,20 +251,24 @@ def create_new_doc(
     if not creds:
         return None, "No Google credentials (credentials.json not found or invalid)"
     try:
-        service = build("docs", "v1", credentials=creds)
-        doc = service.documents().create(body={"title": title}).execute()
+        docs_service = build("docs", "v1", credentials=creds)
+        # Create the empty doc
+        doc = docs_service.documents().create(body={"title": title}).execute()
         document_id = doc.get("documentId")
         if not document_id:
             return None, "Created doc but no documentId returned"
+        # Move into Drive folder (creates folder first time if needed)
+        _ensure_doc_in_folder(creds, document_id)
+        # Insert formatted content
         if formatted and markdown_text.strip():
             _, fmt_requests = _build_formatted_doc_requests(markdown_text)
             if fmt_requests:
-                service.documents().batchUpdate(
+                docs_service.documents().batchUpdate(
                     documentId=document_id, body={"requests": fmt_requests}
                 ).execute()
                 return document_id, None
         text = _markdown_to_plain(markdown_text)
-        service.documents().batchUpdate(
+        docs_service.documents().batchUpdate(
             documentId=document_id,
             body={"requests": [{"insertText": {"location": {"index": 1}, "text": text}}]},
         ).execute()
