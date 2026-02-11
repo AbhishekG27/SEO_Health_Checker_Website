@@ -1,0 +1,25 @@
+name: Daily SEO Audit
+
+on:
+  schedule:
+    - cron: '0 10 * * *'  # 10 AM UTC daily
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run audit
+        env:
+          GOOGLE_PAGESPEED_API_KEY: ${{ secrets.GOOGLE_PAGESPEED_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          SCHEDULED_AUDIT_URL: ${{ secrets.SCHEDULED_AUDIT_URL }}
+          GOOGLE_CREDENTIALS_FILE: ${{ secrets.GOOGLE_CREDENTIALS_FILE }}
+        run: python run_scheduled_audit.py
