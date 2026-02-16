@@ -1,0 +1,45 @@
+# Daily SEO Health Check — runs at 10:00 AM India time (IST), creates report + gap analysis docs in Google Drive.
+# Requires GitHub repo Secrets: GOOGLE_PAGESPEED_API_KEY, GEMINI_API_KEY, GOOGLE_CREDENTIALS_JSON, GOOGLE_TOKEN_JSON.
+
+name: Daily SEO Health Check
+
+on:
+  schedule:
+    # 10:00 AM IST = 04:30 UTC
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Google OAuth files
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+        run: |
+          printf '%s' "$GOOGLE_CREDENTIALS_JSON" > credentials.json
+          printf '%s' "$GOOGLE_TOKEN_JSON" > token_docs.json
+
+      - name: Run scheduled SEO audit
+        env:
+          GOOGLE_PAGESPEED_API_KEY: ${{ secrets.GOOGLE_PAGESPEED_API_KEY }}
+          PAGESPEED_API_KEY: ${{ secrets.GOOGLE_PAGESPEED_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_CREDENTIALS_FILE: credentials.json
+          SCHEDULED_AUDIT_URL: ${{ secrets.SCHEDULED_AUDIT_URL }}
+          GOOGLE_DRIVE_FOLDER_NAME: ${{ secrets.GOOGLE_DRIVE_FOLDER_NAME }}
+        run: python run_scheduled_audit.py
