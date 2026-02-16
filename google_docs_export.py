@@ -1,8 +1,9 @@
 """
 Optional Google Docs export for SEO reports.
-Requires credentials.json (OAuth) in project root or path in GOOGLE_CREDENTIALS_FILE.
-Also supports Google Drive so docs can be stored in a specific folder.
+Supports: credentials file path, or in-memory JSON strings (for Streamlit Secrets).
+OAuth: local server (desktop) or redirect flow (Streamlit Cloud).
 """
+import json
 import os
 import re
 from pathlib import Path
@@ -17,11 +18,65 @@ try:
 except ImportError:
     HAS_GOOGLE = False
 
-# Docs + Drive so we can create a folder and move docs into it
 SCOPES = [
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive.file",
 ]
+
+
+def _client_config_with_redirect(client_secret_dict: dict, redirect_uri: str) -> dict:
+    """Ensure client config has a single redirect_uri for web flow."""
+    if "web" in client_secret_dict:
+        config = {"web": dict(client_secret_dict["web"])}
+        config["web"]["redirect_uris"] = [redirect_uri]
+        return config
+    if "installed" in client_secret_dict:
+        config = {"installed": dict(client_secret_dict["installed"])}
+        config["installed"]["redirect_uris"] = [redirect_uri]
+        return config
+    return client_secret_dict
+
+
+def get_authorization_url(credentials_json_str: str, redirect_uri: str) -> str:
+    """Build Google OAuth authorization URL for redirect flow (e.g. Streamlit Cloud)."""
+    if not HAS_GOOGLE:
+        return ""
+    try:
+        client_config = json.loads(credentials_json_str)
+        config = _client_config_with_redirect(client_config, redirect_uri)
+        flow = InstalledAppFlow.from_client_config(config, SCOPES)
+        return flow.authorization_url(access_type="offline", prompt="consent")[0]
+    except Exception:
+        return ""
+
+
+def get_creds_from_code(credentials_json_str: str, redirect_uri: str, code: str) -> "tuple[Credentials | None, str]":
+    """Exchange authorization code for credentials. Returns (creds, token_json_str)."""
+    if not HAS_GOOGLE:
+        return None, ""
+    try:
+        client_config = json.loads(credentials_json_str)
+        config = _client_config_with_redirect(client_config, redirect_uri)
+        flow = InstalledAppFlow.from_client_config(config, SCOPES)
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        token_json = creds.to_json()
+        return creds, token_json
+    except Exception:
+        return None, ""
+
+
+def get_creds_from_token_json(credentials_json_str: str, token_json_str: str) -> "Credentials | None":
+    """Build credentials from client secret JSON string + saved token JSON string (no browser)."""
+    if not HAS_GOOGLE or not token_json_str:
+        return None
+    try:
+        creds = Credentials.from_authorized_user_info(json.loads(token_json_str), SCOPES)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        return creds
+    except Exception:
+        return None
 
 
 def _get_creds(credentials_path: str | None) -> "Credentials | None":
