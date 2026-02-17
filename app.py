@@ -1,10 +1,8 @@
 """
 Automated SEO Reports — Streamlit frontend.
-Supports local .env and Streamlit Cloud Secrets (share.streamlit.io).
-First-time Google sign-in via redirect OAuth when token not in Secrets.
+Workflow: Form → PageSpeed Insights (+ optional Serper) → formatted report → new Google Doc.
 """
 import os
-import tempfile
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -12,15 +10,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from seo_client import fetch_pagespeed, fetch_serper, build_report
-from google_docs_export import (
-    append_to_doc,
-    create_new_doc,
-    create_report_and_analysis_docs,
-    get_authorization_url,
-    get_creds_from_code,
-    get_creds_from_token_json,
-    HAS_GOOGLE,
-)
+from google_docs_export import append_to_doc, create_new_doc, create_report_and_analysis_docs, HAS_GOOGLE
 from gemini_gap_analysis import get_gap_analysis
 
 load_dotenv()
@@ -40,158 +30,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+st.title("📊 Automated SEO Report")
+st.caption("Enter a URL to run a performance & SEO audit (PageSpeed Insights + optional Serper SERP data).")
 
-def _secrets_creds_json():
-    """Prefer Docs client secret; allow separate Docs/Drive keys."""
-    try:
-        return st.secrets.get("GOOGLE_CREDENTIALS_JSON") or st.secrets.get("GOOGLE_CREDENTIALS_DOCS_JSON") or ""
-    except Exception:
-        return ""
-
-
-def _secrets_token_json():
-    try:
-        return st.secrets.get("GOOGLE_TOKEN_JSON") or ""
-    except Exception:
-        return ""
-
-
-def _ensure_google_creds_for_cloud():
-    """
-    When using Streamlit Secrets: write credentials + token to a temp dir and set
-    GOOGLE_CREDENTIALS_FILE so the rest of the app uses file-based creds.
-    Returns (ready: bool, show_signin_link: bool, token_for_secrets: str | None).
-    """
-    creds_json = _secrets_creds_json()
-    token_json = _secrets_token_json()
-    # Token in session from a previous OAuth exchange in this session
-    token_in_session = st.session_state.get("google_token_json")
-
-    if not creds_json:
-        return True, False, None  # no Secrets; use .env / file path
-
-    # We have credentials in Secrets
-    if token_json:
-        # Persisted token in Secrets: write both to temp and use them
-        try:
-            tmp = tempfile.mkdtemp()
-            creds_path = os.path.join(tmp, "credentials.json")
-            token_path = os.path.join(tmp, "token_docs.json")
-            with open(creds_path, "w") as f:
-                f.write(creds_json if isinstance(creds_json, str) else __import__("json").dumps(creds_json))
-            with open(token_path, "w") as f:
-                f.write(token_json if isinstance(token_json, str) else __import__("json").dumps(token_json))
-            os.environ["GOOGLE_CREDENTIALS_FILE"] = creds_path
-            try:
-                folder = st.secrets.get("GOOGLE_DRIVE_FOLDER_NAME")
-                if folder:
-                    os.environ["GOOGLE_DRIVE_FOLDER_NAME"] = str(folder)
-            except Exception:
-                pass
-            return True, False, None
-        except Exception:
-            return False, False, None
-
-    if token_in_session:
-        # Same-session token after OAuth: write to temp and use
-        try:
-            tmp = tempfile.mkdtemp()
-            creds_path = os.path.join(tmp, "credentials.json")
-            token_path = os.path.join(tmp, "token_docs.json")
-            with open(creds_path, "w") as f:
-                f.write(creds_json if isinstance(creds_json, str) else __import__("json").dumps(creds_json))
-            with open(token_path, "w") as f:
-                f.write(token_in_session)
-            os.environ["GOOGLE_CREDENTIALS_FILE"] = creds_path
-            return True, False, None
-        except Exception:
-            return False, False, None
-
-    # No token: need first-time OAuth
-    return False, True, None
-
-
-# Resolve API keys: Streamlit Secrets first, then env
-def _get_key(*keys):
-    for k in keys:
-        try:
-            v = st.secrets.get(k)
-            if v:
-                return v
-        except Exception:
-            pass
-        v = os.environ.get(k)
-        if v:
-            return v
-    return None
-
-
-pagespeed_key = _get_key("GOOGLE_PAGESPEED_API_KEY", "PAGESPEED_API_KEY")
-serper_key = _get_key("SERPER_API_KEY")
-gemini_key = _get_key("GEMINI_API_KEY")
-
-# Google Docs/Drive: prepare creds from Secrets or .env; handle first-time OAuth
-creds_ready = False
-show_signin = False
-token_to_show = None
-
-if HAS_GOOGLE:
-    creds_ready, show_signin, token_to_show = _ensure_google_creds_for_cloud()
-    # First-time OAuth callback: URL has ?code=...
-    try:
-        q = st.query_params
-        code = q.get("code")
-        redirect_uri = (st.secrets.get("REDIRECT_URI") or "").strip() or os.environ.get("REDIRECT_URI", "").strip()
-    except Exception:
-        code = None
-        redirect_uri = ""
-
-    if not creds_ready and show_signin and code and redirect_uri:
-        creds_json = _secrets_creds_json()
-        if creds_json:
-            raw = creds_json if isinstance(creds_json, str) else __import__("json").dumps(creds_json)
-            creds, token_json = get_creds_from_code(raw, redirect_uri, code)
-            if creds and token_json:
-                st.session_state["google_token_json"] = token_json
-                try:
-                    st.query_params.clear()
-                except Exception:
-                    pass
-                creds_ready = True
-                token_to_show = token_json
-                _ensure_google_creds_for_cloud()
-
-if show_signin and not creds_ready and not code:
-    redirect_uri = (st.secrets.get("REDIRECT_URI") or os.environ.get("REDIRECT_URI") or "").strip()
-    creds_json = _secrets_creds_json()
-    if redirect_uri and creds_json:
-        auth_url = get_authorization_url(
-            creds_json if isinstance(creds_json, str) else __import__("json").dumps(creds_json),
-            redirect_uri,
-        )
-        if auth_url:
-            st.info("Sign in with Google once to allow creating and saving reports to your Drive.")
-            st.link_button("Sign in with Google", auth_url, type="primary")
-            st.caption("After signing in you will be redirected back. Then add the token shown below to App Settings → Secrets as **GOOGLE_TOKEN_JSON** so you don’t have to sign in again.")
-            st.stop()
-    else:
-        st.warning("To use Google Docs on Streamlit Cloud: add **GOOGLE_CREDENTIALS_JSON** (or **GOOGLE_CREDENTIALS_DOCS_JSON**) and **REDIRECT_URI** (your app URL, e.g. `https://yourapp.streamlit.app/`) in Secrets. Then sign in once and add **GOOGLE_TOKEN_JSON**.")
-        st.stop()
-
-if token_to_show:
-    st.success("You’re signed in. To avoid signing in again next time, add the token below to **App Settings → Secrets** as **GOOGLE_TOKEN_JSON**.")
-    with st.expander("Copy token for GOOGLE_TOKEN_JSON", expanded=True):
-        st.code(token_to_show, language="json")
-    st.caption("Paste the entire content above into Secrets → GOOGLE_TOKEN_JSON, then reload the app.")
+pagespeed_key = os.environ.get("GOOGLE_PAGESPEED_API_KEY") or os.environ.get("PAGESPEED_API_KEY") or st.secrets.get("GOOGLE_PAGESPEED_API_KEY") or st.secrets.get("PAGESPEED_API_KEY")
+serper_key = os.environ.get("SERPER_API_KEY") or st.secrets.get("SERPER_API_KEY")
+gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
 
 if not pagespeed_key:
     st.warning(
-        "Set **GOOGLE_PAGESPEED_API_KEY** (or **PAGESPEED_API_KEY**) in Secrets or `.env`. "
-        "Get a key from [Google Cloud Console](https://console.cloud.google.com/) (PageSpeed Insights API)."
+        "Set **GOOGLE_PAGESPEED_API_KEY** or **PAGESPEED_API_KEY** in `.env`. "
+        "Get a key from [Google Cloud Console](https://console.cloud.google.com/) (PageSpeed Insights API / enable it)."
     )
-
-st.title("📊 Automated SEO Report")
-st.caption("Enter a URL to run a performance & SEO audit (PageSpeed Insights + optional Serper SERP data).")
 
 with st.form("seo_audit_form"):
     url = st.text_input(
@@ -252,10 +102,12 @@ if submitted and url:
                     gap_md, gap_err = get_gap_analysis(report_md, gemini_key)
                     if not gap_md:
                         st.warning(f"Gap analysis could not be generated. {gap_err or 'Gemini returned no content.'}")
+            # Keep full report (with gap section) for preview and download; store gap separately for two-doc export
             report_with_gap = report_md + ("\n\n---\n\n## Gap Analysis (Gemini)\n\n" + gap_md if gap_md else "")
             st.session_state["last_report"] = report_with_gap
             st.session_state["last_url"] = url
             st.session_state["last_gap_md"] = gap_md
+            # Create two separate Google Docs: report + gap analysis (or one doc if no gap)
             if HAS_GOOGLE and report_md:
                 creds_path = os.environ.get("GOOGLE_CREDENTIALS_FILE") or "credentials.json"
                 domain = urlparse(url).netloc or url.replace("https://", "").replace("http://", "").split("/")[0] or "report"

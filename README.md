@@ -100,6 +100,31 @@ git push -u origin main
 
 Do not commit `.env`, `credentials.json`, `client_secret*.json`, or `token_docs.json`; they are in `.gitignore`.
 
+### Deploy to Streamlit Cloud
+
+1. **Push your code to GitHub** (if not already done)
+
+2. **Go to [share.streamlit.io](https://share.streamlit.io/)** and sign in with GitHub
+
+3. **Create a new app**:
+   - Click "New app"
+   - Select your repository and branch
+   - Set main file to `app.py`
+   - Click "Deploy"
+
+4. **Add secrets** (see [STREAMLIT_CLOUD_SECRETS.md](STREAMLIT_CLOUD_SECRETS.md) for detailed instructions):
+   - Go to your app → Settings → Secrets
+   - Add these secrets:
+     - `GOOGLE_CREDENTIALS_JSON` — Full content of your Docs client secret JSON file
+     - `GOOGLE_TOKEN_JSON` — Full content of `token_docs.json` (generate locally first)
+     - `GOOGLE_PAGESPEED_API_KEY` — Your PageSpeed Insights API key
+     - `GEMINI_API_KEY` — (Optional) For gap analysis
+     - `SERPER_API_KEY` — (Optional) For SERP data
+
+5. **Redeploy** — Your app will automatically redeploy when secrets are added
+
+📖 **Full guide**: See [STREAMLIT_CLOUD_SECRETS.md](STREAMLIT_CLOUD_SECRETS.md) for step-by-step instructions on generating tokens and adding secrets.
+
 ---
 
 ## Keywords (for search)

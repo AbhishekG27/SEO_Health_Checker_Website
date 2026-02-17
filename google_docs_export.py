@@ -1,12 +1,20 @@
 """
 Optional Google Docs export for SEO reports.
-Supports: credentials file path, or in-memory JSON strings (for Streamlit Secrets).
-OAuth: local server (desktop) or redirect flow (Streamlit Cloud).
+Requires credentials.json (OAuth) in project root or path in GOOGLE_CREDENTIALS_FILE.
+Also supports Google Drive so docs can be stored in a specific folder.
+Supports Streamlit secrets: GOOGLE_CREDENTIALS_JSON and GOOGLE_TOKEN_JSON.
 """
-import json
 import os
 import re
+import json
+import tempfile
 from pathlib import Path
+
+try:
+    import streamlit as st
+    HAS_STREAMLIT = True
+except ImportError:
+    HAS_STREAMLIT = False
 
 try:
     from google.oauth2.credentials import Credentials
@@ -18,114 +26,163 @@ try:
 except ImportError:
     HAS_GOOGLE = False
 
+# Docs + Drive so we can create a folder and move docs into it
 SCOPES = [
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive.file",
 ]
 
 
-def _client_config_with_redirect(client_secret_dict: dict, redirect_uri: str) -> dict:
-    """Ensure client config has a single redirect_uri for web flow."""
-    if "web" in client_secret_dict:
-        config = {"web": dict(client_secret_dict["web"])}
-        config["web"]["redirect_uris"] = [redirect_uri]
-        return config
-    if "installed" in client_secret_dict:
-        config = {"installed": dict(client_secret_dict["installed"])}
-        config["installed"]["redirect_uris"] = [redirect_uri]
-        return config
-    return client_secret_dict
-
-
-def get_authorization_url(credentials_json_str: str, redirect_uri: str) -> str:
-    """Build Google OAuth authorization URL for redirect flow (e.g. Streamlit Cloud)."""
-    if not HAS_GOOGLE:
-        return ""
-    try:
-        client_config = json.loads(credentials_json_str)
-        config = _client_config_with_redirect(client_config, redirect_uri)
-        flow = InstalledAppFlow.from_client_config(config, SCOPES)
-        return flow.authorization_url(access_type="offline", prompt="consent")[0]
-    except Exception:
-        return ""
-
-
-def get_creds_from_code(credentials_json_str: str, redirect_uri: str, code: str) -> "tuple[Credentials | None, str]":
-    """Exchange authorization code for credentials. Returns (creds, token_json_str)."""
-    if not HAS_GOOGLE:
-        return None, ""
-    try:
-        client_config = json.loads(credentials_json_str)
-        config = _client_config_with_redirect(client_config, redirect_uri)
-        flow = InstalledAppFlow.from_client_config(config, SCOPES)
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-        token_json = creds.to_json()
-        return creds, token_json
-    except Exception:
-        return None, ""
-
-
-def get_creds_from_token_json(credentials_json_str: str, token_json_str: str) -> "Credentials | None":
-    """Build credentials from client secret JSON string + saved token JSON string (no browser)."""
-    if not HAS_GOOGLE or not token_json_str:
-        return None
-    try:
-        creds = Credentials.from_authorized_user_info(json.loads(token_json_str), SCOPES)
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        return creds
-    except Exception:
-        return None
-
-
 def _get_creds(credentials_path: str | None) -> "Credentials | None":
     if not HAS_GOOGLE:
         return None
-    path = Path(credentials_path or "credentials.json")
-    if not path.exists():
-        return None
+    
+    # Check Streamlit secrets first
+    credentials_json = None
+    token_json = None
+    secrets_error = None
+    if HAS_STREAMLIT:
+        try:
+            # Try to get from Streamlit secrets (can be dict or JSON string)
+            creds_secret = st.secrets.get("GOOGLE_CREDENTIALS_JSON")
+            if creds_secret:
+                if isinstance(creds_secret, dict):
+                    credentials_json = json.dumps(creds_secret)
+                elif isinstance(creds_secret, str):
+                    credentials_json = creds_secret
+            else:
+                secrets_error = "GOOGLE_CREDENTIALS_JSON not found in Streamlit secrets"
+            
+            token_secret = st.secrets.get("GOOGLE_TOKEN_JSON")
+            if token_secret:
+                if isinstance(token_secret, dict):
+                    token_json = json.dumps(token_secret)
+                elif isinstance(token_secret, str):
+                    token_json = token_secret
+            else:
+                if not secrets_error:
+                    secrets_error = "GOOGLE_TOKEN_JSON not found in Streamlit secrets"
+                else:
+                    secrets_error += "; GOOGLE_TOKEN_JSON not found"
+        except Exception as e:
+            secrets_error = f"Error reading Streamlit secrets: {str(e)}"
+    
+    # If we have token from secrets, use it directly (for Streamlit Cloud)
+    if token_json:
+        try:
+            token_data = json.loads(token_json) if isinstance(token_json, str) else token_json
+            creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            return creds
+        except Exception as e:
+            # If token fails, continue to try file-based approach
+            secrets_error = f"Failed to use token from secrets: {str(e)}"
+    
+    # If no secrets, try environment variable or file path
+    path = None
+    if not credentials_json:
+        path = Path(credentials_path or "credentials.json")
+        if path.exists():
+            with open(path, "r") as f:
+                credentials_json = f.read()
+        else:
+            # Return helpful error message
+            error_msg = "No Google credentials found. "
+            if secrets_error:
+                error_msg += f"Streamlit secrets: {secrets_error}. "
+            error_msg += f"Also checked file: {path} (not found). "
+            error_msg += "Please add GOOGLE_CREDENTIALS_JSON and GOOGLE_TOKEN_JSON to Streamlit secrets."
+            raise Exception(error_msg)
+    
+    # Handle token file (for local development)
+    token_path = None
+    if path:
+        token_path = path.parent / "token_docs.json"
+    else:
+        token_path = Path("token_docs.json")
+    
     creds = None
-    token_path = path.parent / "token_docs.json"
     if token_path.exists():
         try:
             creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
         except Exception:
             pass
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(str(path), SCOPES)
-            creds = flow.run_local_server(port=0)
-        if token_path:
-            with open(token_path, "w") as f:
-                f.write(creds.to_json())
+    
+    # Create temp file for credentials if from secrets
+    temp_creds_file = None
+    if not path and credentials_json:
+        temp_creds = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        temp_creds.write(credentials_json)
+        temp_creds.close()
+        temp_creds_file = Path(temp_creds.name)
+        path = temp_creds_file
+    
+    try:
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                # OAuth flow (only works locally, not in Streamlit Cloud)
+                if not path:
+                    return None
+                flow = InstalledAppFlow.from_client_secrets_file(str(path), SCOPES)
+                # Use fixed port 8080 for consistent redirect URI
+                # Make sure http://localhost:8080/ and http://127.0.0.1:8080/ are added to 
+                # Authorized redirect URIs in Google Cloud Console
+                try:
+                    creds = flow.run_local_server(port=8080)
+                except OSError:
+                    # Port 8080 might be in use, try random port as fallback
+                    creds = flow.run_local_server(port=0)
+            # Save token if we have a valid path
+            if token_path and creds:
+                with open(token_path, "w") as f:
+                    f.write(creds.to_json())
+    finally:
+        # Clean up temp files
+        if temp_creds_file and temp_creds_file.exists():
+            try:
+                temp_creds_file.unlink()
+            except Exception:
+                pass
+    
     return creds
 
 
 def _ensure_doc_in_folder(creds: "Credentials", document_id: str) -> None:
     """
     Ensure the given Doc is inside the Drive folder defined by GOOGLE_DRIVE_FOLDER_NAME
-    (default: SEO-Health-Tekspot). Creates the folder on first run.
+    (default: SEO Health Checker). Creates the folder on first run if it doesn't exist.
     """
-    folder_name = os.environ.get("GOOGLE_DRIVE_FOLDER_NAME") or "SEO-Health-Tekspot"
+    folder_name = os.environ.get("GOOGLE_DRIVE_FOLDER_NAME") or "SEO Health Checker"
     if not folder_name:
         return
     try:
         drive_service = build("drive", "v3", credentials=creds)
         # Find or create folder
+        # Search for folder in root (not in trash)
         query = (
             "mimeType = 'application/vnd.google-apps.folder' "
             f"and name = '{folder_name}' and trashed = false"
         )
         res = drive_service.files().list(
-            q=query, pageSize=1, fields="files(id)"
+            q=query, pageSize=10, fields="files(id, name, parents)"
         ).execute()
         files = res.get("files") or []
-        if files:
-            folder_id = files[0]["id"]
-        else:
+        
+        # Prefer folder in root (no parents) or use first match
+        folder_id = None
+        for f in files:
+            parents = f.get("parents") or []
+            if not parents:  # Root folder
+                folder_id = f["id"]
+                break
+        if not folder_id and files:
+            folder_id = files[0]["id"]  # Use first match if no root folder found
+        
+        # Create folder if it doesn't exist
+        if not folder_id:
             meta = {
                 "name": folder_name,
                 "mimeType": "application/vnd.google-apps.folder",
@@ -134,16 +191,27 @@ def _ensure_doc_in_folder(creds: "Credentials", document_id: str) -> None:
                 body=meta, fields="id"
             ).execute()
             folder_id = folder.get("id")
+        
         if not folder_id:
             return
-        # Add the doc to this folder (keeps existing parents)
-        drive_service.files().update(
-            fileId=document_id,
-            addParents=folder_id,
-            fields="id, parents",
-        ).execute()
-    except Exception:
+        
+        # Add doc to folder (ensures it appears in the folder)
+        # Check if doc is already in the folder
+        doc = drive_service.files().get(fileId=document_id, fields="parents").execute()
+        current_parents = doc.get("parents") or []
+        
+        if folder_id not in current_parents:
+            # Add folder as parent - doc will appear in the folder
+            drive_service.files().update(
+                fileId=document_id,
+                addParents=folder_id,
+                fields="id, parents",
+            ).execute()
+    except Exception as e:
         # Folder placement is best-effort; ignore failures so report creation still works.
+        # Log error for debugging but don't fail the doc creation
+        import sys
+        print(f"Warning: Could not move doc to Drive folder '{folder_name}': {e}", file=sys.stderr)
         return
 
 
@@ -302,7 +370,10 @@ def create_new_doc(
     """
     if not HAS_GOOGLE:
         return None, "Google API libraries not installed"
-    creds = _get_creds(credentials_path)
+    try:
+        creds = _get_creds(credentials_path)
+    except Exception as e:
+        return None, str(e)
     if not creds:
         return None, "No Google credentials (credentials.json not found or invalid)"
     try:
@@ -347,7 +418,10 @@ def create_report_and_analysis_docs(
     """
     if not HAS_GOOGLE:
         return None, None, "Google API libraries not installed"
-    creds = _get_creds(credentials_path)
+    try:
+        creds = _get_creds(credentials_path)
+    except Exception as e:
+        return None, None, str(e)
     if not creds:
         return None, None, "No Google credentials (credentials.json not found or invalid)"
     report_id, err = create_new_doc(
@@ -377,7 +451,10 @@ def append_to_doc(document_id: str, markdown_text: str, credentials_path: str | 
     document_id = doc_id
     if not HAS_GOOGLE:
         return "Google API libraries not installed"
-    creds = _get_creds(credentials_path)
+    try:
+        creds = _get_creds(credentials_path)
+    except Exception as e:
+        return str(e)
     if not creds:
         return "No Google credentials (credentials.json not found or invalid)"
     try:

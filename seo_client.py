@@ -26,15 +26,24 @@ def fetch_pagespeed(url: str, api_key: str, strategy: str = "mobile") -> dict[st
     Returns raw API response (lighthouseResult, loadingExperience, etc.).
     """
     url = _normalize_url(url)
+    # PageSpeed API accepts multiple category parameters
+    # requests library will convert list to multiple query params: ?category=performance&category=accessibility...
     params = {
         "url": url,
         "key": api_key,
         "strategy": strategy,
         "category": ["performance", "accessibility", "best-practices", "seo"],
     }
-    response = requests.get(PAGESPEED_URL, params=params, timeout=90)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.get(PAGESPEED_URL, params=params, timeout=90)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        # Provide more detailed error information
+        error_msg = f"PageSpeed API error: {e}"
+        if hasattr(e.response, 'text'):
+            error_msg += f" - {e.response.text[:200]}"
+        raise Exception(error_msg) from e
 
 
 def fetch_serper(query: str, api_key: str, num: int = 10) -> dict[str, Any] | None:
